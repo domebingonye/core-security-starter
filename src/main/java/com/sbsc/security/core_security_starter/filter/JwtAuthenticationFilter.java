@@ -1,64 +1,80 @@
 package com.sbsc.security.core_security_starter.filter;
 
-import com.sbsc.security.core_security_starter.config.PropsReader;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sbsc.core_security_starter.constant.CommonConstants;
+import com.sbsc.security.core_security_starter.config.CustomAuthenticationToken;
 import com.sbsc.security.core_security_starter.util.JwtTokenUtil;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Component
-@Slf4j
-@RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
-    private final JwtTokenUtil jwtUtils;
-    public final PropsReader propsReader;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @Override
-    protected void doFilterInternal(HttpServletRequest httpServletRequest, HttpServletResponse httpServletResponse, FilterChain filterChain) throws ServletException, IOException{
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
+
+        String header = request.getHeader(CommonConstants.AUTHORIZATION_KEY);
+
+        if (!StringUtils.hasText(header) || !header.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
         try {
-            String jwt = parseJwt(httpServletRequest);
-            if (jwt != null && jwtUtils.validateJwtToken(jwt, propsReader.getJwtVerifierKey())) {
-                Claims claims = jwtUtils.getClaimsFromToken(jwt, propsReader.getJwtVerifierKey());
-                GrantedAuthority authority = new SimpleGrantedAuthority((String)claims.get("role"));
-                UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                        buildUserDetails(claims), null, Collections.singleton(authority));
-                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(httpServletRequest));
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+
+            String token = header.substring(7);
+
+            Claims claims = validateJwtToken(token);
+            String username = claims.getSubject();
+
+            List<String> roles = claims.get("roles", List.class);
+            if (roles == null) {
+                roles = List.of();
             }
-        } catch (Exception e) {
-            logger.error("Cannot set user authentication: {}", e);
+
+            List<GrantedAuthority> authorities = roles.stream().map(SimpleGrantedAuthority::new).collect(Collectors.toList());
+
+            CustomAuthenticationToken authentication = new CustomAuthenticationToken(token, username, null, authorities);
+
+            authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+
+        } catch (Exception ex) {
+            SecurityContextHolder.clearContext();
         }
-        filterChain.doFilter(httpServletRequest, httpServletResponse);
+
+        filterChain.doFilter(request, response);
     }
 
-    private String parseJwt(HttpServletRequest request) {
-        String headerAuth = request.getHeader("Authorization");
-        if (StringUtils.hasText(headerAuth) && headerAuth.startsWith("Bearer ")) {
-            return headerAuth.substring(7);
-        }
-        return null;
-    }
+    public Claims validateJwtToken(String token) {
 
-    private static LinkedHashMap<String, Object> buildUserDetails(Claims claims){
-        LinkedHashMap<String, Object> userDetails = new LinkedHashMap<>();
-        userDetails.put("username", claims.getSubject());
-        userDetails.put("role", claims.get("role"));
-        return userDetails;
+        boolean isValidToken = JwtTokenUtil.validateJwtToken(token);
+
+        if (!isValidToken) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid User");
+        }
+
+        return JwtTokenUtil.getClaimsFromToken(token);
     }
 }
 
